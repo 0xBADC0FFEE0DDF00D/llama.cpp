@@ -730,6 +730,35 @@ ggml_tensor * clip_graph::build_rope_2d(
     return cur;
 }
 
+ggml_tensor * clip_graph::build_rope_2d_ovis(
+    ggml_context * ctx0,
+    ggml_tensor * cur,      // [n_dim, n_head, n_pos]
+    ggml_tensor * pos_h,    // [n_pos]
+    ggml_tensor * pos_w,    // [n_pos]
+    float freq_base
+) {
+    const int64_t n_dim  = cur->ne[0];
+    const int64_t n_head = cur->ne[1];
+    const int64_t n_pos  = cur->ne[2];
+
+    // interleave: group into [n_dim/2, 2] then swap dims to make "which half" vary fastest
+    cur = ggml_reshape_4d(ctx0, cur, n_dim/2, 2, n_head, n_pos);
+    cur = ggml_permute(ctx0, cur, 1, 0, 2, 3);   // [2, n_dim/2, n_head, n_pos]
+    cur = ggml_cont(ctx0, cur);
+    cur = ggml_reshape_3d(ctx0, cur, n_dim, n_head, n_pos);
+
+    // apply standard 2D RoPE: first half dims use pos_h, second half use pos_w
+    cur = build_rope_2d(ctx0, cur, pos_h, pos_w, freq_base, false);
+
+    // reverse teh interleaving
+    cur = ggml_reshape_4d(ctx0, cur, 2, n_dim/2, n_head, n_pos);
+    cur = ggml_permute(ctx0, cur, 1, 0, 2, 3);   // [n_dim/2, 2, n_head, n_pos]
+    cur = ggml_cont(ctx0, cur);
+    cur = ggml_reshape_3d(ctx0, cur, n_dim, n_head, n_pos);
+
+    return cur;
+}
+
 // Generic function to stack frames for audio processing
 // Abstracts out the StackAudioFrames logic used by ultravox
 ggml_tensor * clip_graph::build_stack(ggml_tensor * cur, int32_t stack_factor, int32_t n_embed) {
@@ -881,6 +910,10 @@ static ggml_cgraph * clip_image_build_graph(clip_ctx * ctx, const clip_image_f32
         case PROJECTOR_TYPE_YOUTUVL:
             {
                 builder = std::make_unique<clip_graph_youtuvl>(ctx, img);
+            } break;
+        case PROJECTOR_TYPE_OVIS:
+            {
+                builder = std::make_unique<clip_graph_ovis>(ctx, img);
             } break;
         default:
             GGML_ABORT("missing cgraph builder");
@@ -1169,6 +1202,14 @@ struct clip_model_loader {
                         get_u32(KEY_IMAGE_MIN_PIXELS, hparams.image_min_pixels);
                         get_u32(KEY_IMAGE_MAX_PIXELS, hparams.image_max_pixels);
                         hparams.set_warmup_n_tokens(16*16);
+                    } break;
+                case PROJECTOR_TYPE_OVIS:
+                    {
+                        hparams.rope_theta = 10000.0f; // SigLIP2 default
+                        get_u32(KEY_SPATIAL_MERGE_SIZE, hparams.n_merge, false);
+                        if (hparams.n_merge == 0) {
+                            hparams.n_merge = 2; // default hidden_stride
+                        }
                     } break;
                 case PROJECTOR_TYPE_PIXTRAL:
                     {
@@ -1881,6 +1922,16 @@ struct clip_model_loader {
                     model.mm_0_b = get_tensor(string_format(TN_LLAVA_PROJ, 0, "bias"));
                     model.mm_2_w = get_tensor(string_format(TN_LLAVA_PROJ, 2, "weight"));
                     model.mm_2_b = get_tensor(string_format(TN_LLAVA_PROJ, 2, "bias"));
+                } break;
+            case PROJECTOR_TYPE_OVIS:
+                {
+                    model.mm_0_w         = get_tensor(string_format(TN_LLAVA_PROJ, 0, "weight"));
+                    model.mm_post_norm_w = get_tensor(string_format(TN_MM_POST_NORM, "weight"));
+                    model.mm_post_norm_b = get_tensor(string_format(TN_MM_POST_NORM, "bias"));
+                    model.mm_vte_w       = get_tensor(string_format(TN_MM_VTE, "weight"));
+                    // Ovis _encode uses hidden_states[-1] (no post-LN), not last_hidden_state
+                    model.post_ln_w = nullptr;
+                    model.post_ln_b = nullptr;
                 } break;
             case PROJECTOR_TYPE_LFM2A:
                 {
@@ -3204,6 +3255,7 @@ bool clip_image_preprocess(struct clip_ctx * ctx, const clip_image_u8 * img, str
         case PROJECTOR_TYPE_GLM_EDGE:
         case PROJECTOR_TYPE_GEMMA3:
         case PROJECTOR_TYPE_NEMOTRON_V2_VL:
+        case PROJECTOR_TYPE_OVIS:
             {
                 clip_image_u8 resized_image;
                 int sz = params.image_size;
@@ -3531,6 +3583,7 @@ int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * im
         case PROJECTOR_TYPE_INTERNVL:
         case PROJECTOR_TYPE_NEMOTRON_V2_VL:
         case PROJECTOR_TYPE_LLAMA4:
+        case PROJECTOR_TYPE_OVIS:
             {
                 // both X and Y are downscaled by the scale factor
                 int scale_factor = ctx->model.hparams.n_merge;
@@ -3919,6 +3972,7 @@ bool clip_image_batch_encode(clip_ctx * ctx, const int n_threads, const clip_ima
         case PROJECTOR_TYPE_KIMIVL:
         case PROJECTOR_TYPE_KIMIK25:
         case PROJECTOR_TYPE_LIGHTONOCR:
+        case PROJECTOR_TYPE_OVIS:
             {
                 // set the 2D positions
                 int n_patches_per_col = image_size_width / patch_size;
@@ -4154,6 +4208,8 @@ int clip_n_mmproj_embd(const struct clip_ctx * ctx) {
             return ctx->model.position_embeddings->ne[0];
         case PROJECTOR_TYPE_GLM4V:
             return ctx->model.mm_ffn_down_w->ne[1];
+        case PROJECTOR_TYPE_OVIS:
+            return ctx->model.mm_vte_w->ne[0];
         default:
             GGML_ABORT("Unknown projector type");
     }

@@ -333,6 +333,11 @@ struct mtmd_context {
             // <|IMAGE_START|> ... (image embeddings) ... <|IMAGE_END|>
             img_beg = "<|IMAGE_START|>";
             img_end = "<|IMAGE_END|>";
+
+        } else if (proj == PROJECTOR_TYPE_OVIS) {
+            // <ovis_image_start> ... (image embeddings) ... <ovis_image_end>
+            img_beg = "<ovis_image_start>";
+            img_end = "<ovis_image_end>";
         }
     }
 

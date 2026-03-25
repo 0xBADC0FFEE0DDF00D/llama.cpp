@@ -363,6 +363,9 @@ struct clip_model {
     ggml_tensor * mm_norm_pre_b = nullptr;
     ggml_tensor * mm_norm_mid_w = nullptr;
 
+    // ovis visual token embedding
+    ggml_tensor * mm_vte_w = nullptr;
+
     // cogvlm
     ggml_tensor * mm_post_fc_norm_w = nullptr;
     ggml_tensor * mm_post_fc_norm_b = nullptr;
