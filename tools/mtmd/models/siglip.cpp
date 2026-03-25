@@ -92,3 +92,75 @@ ggml_cgraph * clip_graph_siglip::build() {
 
     return gf;
 }
+
+ggml_cgraph * clip_graph_ovis::build() {
+    // 2D pos inputs for RoPE
+    ggml_tensor * pos_h = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_patches);
+    ggml_set_name(pos_h, "pos_h");
+    ggml_set_input(pos_h);
+
+    ggml_tensor * pos_w = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_patches);
+    ggml_set_name(pos_w, "pos_w");
+    ggml_set_input(pos_w);
+
+    // SigLIP2 NaViT uses emb = cat(h,w,h,w) with rotate_half pairing (i, i+d/2)
+    auto add_pos = [&](ggml_tensor * cur, const clip_layer &) {
+        return build_rope_2d_ovis(ctx0, cur, pos_h, pos_w, hparams.rope_theta);
+    };
+
+    ggml_tensor * inp = build_inp();
+
+    // Ovis SigLIP2 uses BOTH learned position embeddings AND RoPE.
+    // Learned PE (with interpolation for dynamic sizes) is added to patch embeddings;
+    // RoPE is applied in attention...
+    ggml_tensor * learned_pos_embd = model.position_embeddings
+        ? resize_position_embeddings()
+        : nullptr;
+
+    ggml_tensor * cur = build_vit(
+                            inp, n_patches,
+                            NORM_TYPE_NORMAL,
+                            hparams.ffn_op,
+                            learned_pos_embd,
+                            add_pos);
+    // cur: [n_embd, n_patches]
+
+    // 2. Hidden stride merge (2x2 pixel unshuffle)
+    const int scale_factor = hparams.n_merge; // hidden_stride = 2
+    cur = build_patch_merge_permute(cur, scale_factor);
+    // cur: [n_embd * scale_factor^2, n_merged_patches]
+
+    // 3. Linear projection (visual_tokenizer.head.0)
+    cur = ggml_mul_mat(ctx0, model.mm_0_w, cur);
+    // cur: [n_visual_logits, n_merged_patches]
+
+    // 4. LayerNorm (visual_tokenizer.head.1)
+    cur = ggml_norm(ctx0, cur, eps);
+    cur = ggml_mul(ctx0, cur, model.mm_post_norm_w);
+    cur = ggml_add(ctx0, cur, model.mm_post_norm_b);
+
+    // 5. Softmax over visual vocabulary dimension
+    cur = ggml_soft_max(ctx0, cur);
+
+    // 6. Soft token embedding lookup via VTE
+    //    result = softmax_probs @ VTE_sub (matrix multiply)
+    //    softmax_probs: [n_visual_logits, n_merged_patches]
+    //    VTE (ggml):    [n_embd_text, visual_vocab_size]
+    //    We only use the first n_visual_logits rows of VTE (skip indicator tokens)
+    const int n_visual_logits = model.mm_0_w->ne[1];
+    ggml_tensor * vte_sub = ggml_view_2d(ctx0, model.mm_vte_w,
+        model.mm_vte_w->ne[0], n_visual_logits,
+        model.mm_vte_w->nb[1], 0);
+    // vte_sub: [n_embd_text, n_visual_logits]
+
+    // Transpose VTE so contraction dimension is ne[0]
+    ggml_tensor * vte_t = ggml_cont(ctx0, ggml_transpose(ctx0, vte_sub));
+    // vte_t: [n_visual_logits, n_embd_text]
+
+    cur = ggml_mul_mat(ctx0, vte_t, cur);
+    // cur: [n_embd_text, n_merged_patches]
+
+    ggml_build_forward_expand(gf, cur);
+
+    return gf;
+}

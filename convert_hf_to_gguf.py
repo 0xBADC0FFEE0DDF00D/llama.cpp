@@ -262,7 +262,9 @@ class ModelBase:
                 missing = sorted(tensor_names_from_index.difference(tensor_names_from_parts))
                 extra = sorted(tensor_names_from_parts.difference(tensor_names_from_index))
                 missing_files = sorted(set(weight_map[n] for n in missing if n in weight_map))
-                if len(extra) == 0 and len(missing_files) > 0:
+                if len(missing) == 0 and len(extra) > 0:
+                    logger.warning("Extra tensors found not in weight map (will be ignored): %s", extra)
+                elif len(extra) == 0 and len(missing_files) > 0:
                     raise ValueError(f"Missing or incomplete model files: {missing_files}\n"
                                      f"Missing tensors: {missing}")
                 else:
@@ -2189,8 +2191,8 @@ class MmprojModel(ModelBase):
             self.gguf_writer.add_vision_head_count(self.find_vparam(["num_attention_heads", "num_heads", "vt_num_attention_heads"]))
 
             # preprocessor config
-            image_mean = _MISTRAL_COMMON_DATASET_MEAN if self.is_mistral_format else self.preprocessor_config["image_mean"]
-            image_std = _MISTRAL_COMMON_DATASET_STD if self.is_mistral_format else self.preprocessor_config["image_std"]
+            image_mean = _MISTRAL_COMMON_DATASET_MEAN if self.is_mistral_format else self.preprocessor_config.get("image_mean", [0.48145466, 0.4578275, 0.40821073])
+            image_std = _MISTRAL_COMMON_DATASET_STD if self.is_mistral_format else self.preprocessor_config.get("image_std", [0.26862954, 0.26130258, 0.27577711])
 
             self.gguf_writer.add_vision_image_mean(image_mean)
             self.gguf_writer.add_vision_image_std(image_std)
@@ -4690,6 +4692,89 @@ class Qwen3MoeModel(Qwen2MoeModel):
             return
 
         super().set_vocab()
+
+
+@ModelBase.register("Ovis2_6_MoeForCausalLM")
+class Ovis2_6MoeModel(Qwen3MoeModel):
+    model_arch = gguf.MODEL_ARCH.QWEN3MOE
+
+    def __init__(self, dir_model: Path, *args, **kwargs):
+        # Emulate Qwen3MoeModel: Ovis stores LLM config under "llm_config" instead of top-level
+        hparams = ModelBase.load_hparams(dir_model, False)
+        llm_config = hparams.get("llm_config", {})
+        merged = {**hparams, **llm_config}
+        super().__init__(dir_model, *args, hparams=merged, **kwargs)
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        if not name.startswith("llm."):
+            return
+
+        name = name.removeprefix("llm.")
+        yield from super().modify_tensors(data_torch, name, bid)
+
+
+@ModelBase.register("Ovis2_6_MoeForCausalLM")
+class Ovis2_6VisionModel(MmprojModel):
+    def __init__(self, dir_model: Path, *args, **kwargs):
+        # Ovis config has non-standard layout:
+        #   llm_config -> text model config
+        #   vit_config -> SigLIP2 vision config (top-level)
+        hparams = ModelBase.load_hparams(dir_model, False)
+
+        if "llm_config" in hparams:
+            hparams["text_config"] = hparams["llm_config"]
+        if "vit_config" in hparams:
+            hparams["vision_config"] = hparams["vit_config"]
+
+        self.visual_vocab_size = hparams.get("visual_vocab_size", 65536)
+        self.hidden_stride = hparams.get("vit_config", {}).get("hidden_stride", 2)
+
+        super().__init__(dir_model, *args, hparams=hparams, **kwargs)
+
+        # SigLIP2 style normalization
+        if "image_mean" not in self.preprocessor_config:
+            self.preprocessor_config["image_mean"] = [0.5, 0.5, 0.5]
+        if "image_std" not in self.preprocessor_config:
+            self.preprocessor_config["image_std"] = [0.5, 0.5, 0.5]
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        self.gguf_writer.add_clip_projector_type(gguf.VisionProjectorType.OVIS)
+        self.gguf_writer.add_vision_spatial_merge_size(self.hidden_stride)
+        self.gguf_writer.add_vision_use_gelu(True)
+        self.gguf_writer.add_vision_attention_layernorm_eps(
+            self.find_vparam(["layer_norm_eps"], optional=True) or 1e-6
+        )
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        if name.startswith("llm."):
+            return
+
+        if name.startswith("visual_tokenizer.vit."):
+            if "post_layernorm" in name:
+                return
+            new_name = name.replace("visual_tokenizer.vit.", "vision_tower.")
+            yield from super().modify_tensors(data_torch, new_name, bid)
+            return
+
+        if name == "visual_tokenizer.head.0.weight":
+            yield (gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.V_MMPROJ].format(bid=0) + ".weight", data_torch)
+            return
+        if name == "visual_tokenizer.head.1.weight":
+            yield (gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.V_MM_POST_NORM] + ".weight", data_torch)
+            return
+        if name == "visual_tokenizer.head.1.bias":
+            yield (gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.V_MM_POST_NORM] + ".bias", data_torch)
+            return
+
+        if name == "vte.weight":
+            yield (gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.V_MM_VTE] + ".weight", data_torch)
+            return
+
+    def tensor_force_quant(self, name, new_name, bid, n_dims):
+        if "mm.vte" in new_name:
+            return gguf.GGMLQuantizationType.F16 if self.ftype == gguf.LlamaFileType.MOSTLY_F16 else gguf.GGMLQuantizationType.F32
+        return super().tensor_force_quant(name, new_name, bid, n_dims)
 
 
 @ModelBase.register("Qwen3NextForCausalLM")
@@ -12441,10 +12526,13 @@ def get_model_architecture(hparams: dict[str, Any], model_type: ModelType) -> st
         arch = hparams["ssm_cfg"].get("layer", "Mamba") + "ForCausalLM"
 
     # if "architectures" is found in the sub-config, use that instead
-    if model_type == ModelType.TEXT and text_config.get("architectures") is not None:
-        arch = text_config["architectures"][0]
-    elif model_type == ModelType.MMPROJ and vision_config.get("architectures") is not None:
-        arch = vision_config["architectures"][0]
+    # but only if the top-level architecture is not already registered
+    arch_is_registered = arch is not None and arch in ModelBase._model_classes.get(model_type, {})
+    if not arch_is_registered:
+        if model_type == ModelType.TEXT and text_config.get("architectures") is not None:
+            arch = text_config["architectures"][0]
+        elif model_type == ModelType.MMPROJ and vision_config.get("architectures") is not None:
+            arch = vision_config["architectures"][0]
     if arch is None:
         raise ValueError("Failed to detect model architecture")
     return arch

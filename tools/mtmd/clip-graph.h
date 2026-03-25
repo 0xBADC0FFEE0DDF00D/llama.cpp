@@ -112,6 +112,14 @@ struct clip_graph {
         const bool interleave_freq
     );
 
+    ggml_tensor * build_rope_2d_ovis(
+        ggml_context * ctx0,
+        ggml_tensor * cur,
+        ggml_tensor * pos_h,
+        ggml_tensor * pos_w,
+        float freq_base
+    );
+
     // aka pixel_shuffle / pixel_unshuffle / patch_merger (Kimi-VL)
     // support dynamic resolution
     ggml_tensor * build_patch_merge_permute(ggml_tensor * cur, int scale_factor);

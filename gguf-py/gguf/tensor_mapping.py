@@ -1689,6 +1689,10 @@ class TensorNameMap:
             "model.vision.eoi", # cogvlm
         ),
 
+        MODEL_TENSOR.V_MM_VTE: (
+            "vte", # ovis
+        ),
+
         # audio (mtmd)
 
         MODEL_TENSOR.A_ENC_EMBD_POS: (

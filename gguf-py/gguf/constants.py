@@ -755,6 +755,7 @@ class MODEL_TENSOR(IntEnum):
     V_MM_GATE            = auto() # cogvlm
     V_TOK_BOI            = auto() # cogvlm
     V_TOK_EOI            = auto() # cogvlm
+    V_MM_VTE             = auto() # ovis (visual token embedding)
     # audio (mtmd)
     A_ENC_EMBD_POS        = auto()
     A_ENC_EMBD_NORM       = auto()
@@ -1199,6 +1200,7 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
     MODEL_TENSOR.V_MM_GATE:                 "mm.gate",
     MODEL_TENSOR.V_TOK_BOI:                 "v.boi",
     MODEL_TENSOR.V_TOK_EOI:                 "v.eoi",
+    MODEL_TENSOR.V_MM_VTE:                  "mm.vte",           # ovis
     # audio (mtmd)
     # note: all audio tensor names must use prefix "a." or "mm.a."
     MODEL_TENSOR.A_ENC_EMBD_POS:            "a.position_embd",
@@ -1317,6 +1319,7 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.V_MM_GATE,
         MODEL_TENSOR.V_TOK_BOI,
         MODEL_TENSOR.V_TOK_EOI,
+        MODEL_TENSOR.V_MM_VTE,
         # audio
         MODEL_TENSOR.A_ENC_EMBD_POS,
         MODEL_TENSOR.A_ENC_EMBD_NORM,
@@ -3943,6 +3946,7 @@ class VisionProjectorType:
     GLM4V = "glm4v"
     YOUTUVL = "youtuvl"
     NEMOTRON_V2_VL = "nemotron_v2_vl"
+    OVIS = "ovis"
 
 
 # Items here are (block size, type size)

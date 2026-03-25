@@ -112,6 +112,7 @@
 #define TN_DEEPSTACK_NORM  "v.deepstack.%d.norm.%s"     // qwen3vl deepstack
 #define TN_DEEPSTACK_FC1   "v.deepstack.%d.fc1.%s"      // qwen3vl deepstack
 #define TN_DEEPSTACK_FC2   "v.deepstack.%d.fc2.%s"      // qwen3vl deepstack
+#define TN_MM_VTE          "mm.vte.%s"                  // ovis visual token embedding
 
 // mimicpmv
 #define TN_MINICPMV_POS_EMBD_K "resampler.pos_embed_k"
@@ -241,6 +242,7 @@ enum projector_type {
     PROJECTOR_TYPE_YOUTUVL,
     PROJECTOR_TYPE_KIMIK25,
     PROJECTOR_TYPE_NEMOTRON_V2_VL,
+    PROJECTOR_TYPE_OVIS,
     PROJECTOR_TYPE_UNKNOWN,
 };
 
@@ -278,6 +280,7 @@ static std::map<projector_type, std::string> PROJECTOR_TYPE_NAMES = {
     { PROJECTOR_TYPE_YOUTUVL,   "youtuvl"},
     { PROJECTOR_TYPE_KIMIK25,   "kimik25"},
     { PROJECTOR_TYPE_NEMOTRON_V2_VL, "nemotron_v2_vl"},
+    { PROJECTOR_TYPE_OVIS,          "ovis"},
 };
 
 static projector_type clip_projector_type_from_string(const std::string & str) {
